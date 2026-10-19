@@ -1,0 +1,248 @@
+"""
+Intelligent Chatbot using Python
+--------------------------------
+A rule-based NLP chatbot that uses only the Python standard library.
+
+How it works:
+1. Preprocessing: lowercase, tokenize, remove stop words, light stemming
+2. Typo correction: fuzzy-matches unknown words against known vocabulary
+3. Intent matching: scores the message against example patterns (Dice similarity)
+4. Special skills: remembers your name, tells time/date, does safe math
+"""
+
+import ast
+import difflib
+import operator
+import random
+import re
+from datetime import datetime
+
+# ---------------------------------------------------------------------------
+# Knowledge base: add your own intents here
+# ---------------------------------------------------------------------------
+INTENTS = [
+    {
+        "tag": "greeting",
+        "patterns": ["hello", "hi", "hey", "good morning", "good evening", "hi there"],
+        "responses": ["Hello! How can I help you today?", "Hi there! What can I do for you?"],
+    },
+    {
+        "tag": "goodbye",
+        "patterns": ["bye", "goodbye", "see you later", "quit", "exit"],
+        "responses": ["Goodbye! Have a great day!", "Bye! Talk to you soon."],
+    },
+    {
+        "tag": "thanks",
+        "patterns": ["thanks", "thank you", "thanks a lot", "that helped"],
+        "responses": ["You're welcome!", "Happy to help!"],
+    },
+    {
+        "tag": "name",
+        "patterns": ["what is your name", "who are you", "your name"],
+        "responses": ["I'm PyBot, an intelligent chatbot built with Python."],
+    },
+    {
+        "tag": "how_are_you",
+        "patterns": ["how are you", "how are you doing", "how is it going"],
+        "responses": ["I'm doing great, thanks for asking! How about you?"],
+    },
+    {
+        "tag": "capabilities",
+        "patterns": ["what can you do", "help", "how can you help me", "your features"],
+        "responses": [
+            "I can chat, answer simple questions, tell the time and date, "
+            "do math (try 'calculate 12 * 5'), tell jokes, and remember your name."
+        ],
+    },
+    {
+        "tag": "joke",
+        "patterns": ["tell me a joke", "joke", "make me laugh", "say something funny"],
+        "responses": [
+            "Why do programmers prefer dark mode? Because light attracts bugs!",
+            "Why did the developer go broke? Because he used up all his cache.",
+            "There are 10 kinds of people: those who understand binary and those who don't.",
+        ],
+    },
+    {
+        "tag": "python",
+        "patterns": ["what is python", "tell me about python", "python language"],
+        "responses": [
+            "Python is a popular, beginner-friendly programming language used for "
+            "web development, data science, automation, and AI."
+        ],
+    },
+    {
+        "tag": "chatbot",
+        "patterns": ["what is a chatbot", "tell me about chatbots", "explain chatbot"],
+        "responses": [
+            "A chatbot is a program that simulates conversation with people using "
+            "text or voice, often powered by natural language processing."
+        ],
+    },
+]
+
+FALLBACKS = [
+    "Sorry, I didn't quite understand that. Could you rephrase?",
+    "I'm still learning. Try asking something else, or type 'help'.",
+]
+
+# ---------------------------------------------------------------------------
+# Text preprocessing
+# ---------------------------------------------------------------------------
+STOP_WORDS = {"a", "an", "the", "is", "am", "to", "of", "please", "me", "can", "it", "s"}
+
+
+def stem(word: str) -> str:
+    """Very light stemmer: strips common suffixes."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def tokenize(text: str) -> list[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return [stem(w) for w in words if w not in STOP_WORDS]
+
+
+VOCABULARY = {tok for intent in INTENTS for p in intent["patterns"] for tok in tokenize(p)}
+
+
+def correct_typos(tokens: list[str]) -> list[str]:
+    """Replace unknown words with the closest known word (if similar enough)."""
+    fixed = []
+    for tok in tokens:
+        if tok in VOCABULARY or tok.isdigit():
+            fixed.append(tok)
+        else:
+            match = difflib.get_close_matches(tok, VOCABULARY, n=1, cutoff=0.8)
+            fixed.append(match[0] if match else tok)
+    return fixed
+
+
+# ---------------------------------------------------------------------------
+# Intent matching
+# ---------------------------------------------------------------------------
+def dice_score(a: list[str], b: list[str]) -> float:
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return 2 * len(sa & sb) / (len(sa) + len(sb))
+
+
+def classify(message: str, threshold: float = 0.5):
+    tokens = correct_typos(tokenize(message))
+    best_tag, best_score = None, 0.0
+    for intent in INTENTS:
+        for pattern in intent["patterns"]:
+            score = dice_score(tokens, tokenize(pattern))
+            if score > best_score:
+                best_tag, best_score = intent["tag"], score
+    return (best_tag, best_score) if best_score >= threshold else (None, best_score)
+
+
+# ---------------------------------------------------------------------------
+# Safe math evaluation (no eval())
+# ---------------------------------------------------------------------------
+OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+    ast.USub: operator.neg,
+}
+
+
+def safe_eval(node):
+    if isinstance(node, ast.Expression):
+        return safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in OPERATORS:
+        return OPERATORS[type(node.op)](safe_eval(node.left), safe_eval(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in OPERATORS:
+        return OPERATORS[type(node.op)](safe_eval(node.operand))
+    raise ValueError("unsupported expression")
+
+
+def try_math(message: str):
+    match = re.search(r"(?:calculate|solve|what is|what's|compute)?\s*([\d\s+\-*/().%^]+)$", message.lower())
+    if not match:
+        return None
+    expression = match.group(1).strip().replace("^", "**")
+    if not any(ch.isdigit() for ch in expression) or not re.search(r"[+\-*/%]", expression):
+        return None
+    try:
+        result = safe_eval(ast.parse(expression, mode="eval"))
+        return f"The answer is {round(result, 4):g}"
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError):
+        return "Sorry, I couldn't calculate that."
+
+
+# ---------------------------------------------------------------------------
+# Chatbot
+# ---------------------------------------------------------------------------
+class Chatbot:
+    def __init__(self):
+        self.user_name = None
+
+    def respond(self, message: str) -> str:
+        text = message.strip()
+        if not text:
+            return "Say something and I'll respond!"
+        lower = text.lower()
+
+        # 1. Remember the user's name
+        name_match = re.search(r"(?:my name is|i am|i'm|call me)\s+([a-zA-Z]+)", lower)
+        if name_match:
+            self.user_name = name_match.group(1).capitalize()
+            return f"Nice to meet you, {self.user_name}!"
+        if re.search(r"what(?:'s| is) my name|who am i", lower):
+            return f"Your name is {self.user_name}." if self.user_name else "I don't know your name yet. Tell me!"
+
+        # 2. Time and date
+        if re.search(r"\btime\b", lower):
+            return "The current time is " + datetime.now().strftime("%I:%M %p")
+        if re.search(r"\b(date|today|day)\b", lower):
+            return "Today is " + datetime.now().strftime("%A, %d %B %Y")
+
+        # 3. Math
+        math_answer = try_math(text)
+        if math_answer:
+            return math_answer
+
+        # 4. Intent matching
+        tag, _score = classify(text)
+        if tag:
+            intent = next(i for i in INTENTS if i["tag"] == tag)
+            reply = random.choice(intent["responses"])
+            if tag == "greeting" and self.user_name:
+                reply = reply.replace("Hello!", f"Hello, {self.user_name}!").replace("Hi there!", f"Hi {self.user_name}!")
+            return reply
+
+        return random.choice(FALLBACKS)
+
+    @staticmethod
+    def is_exit(message: str) -> bool:
+        tag, _ = classify(message)
+        return tag == "goodbye"
+
+
+def main():
+    bot = Chatbot()
+    print("PyBot: Hi! I'm PyBot. Type 'help' to see what I can do, or 'bye' to quit.")
+    while True:
+        try:
+            message = input("You: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nPyBot: Goodbye!")
+            break
+        print("PyBot:", bot.respond(message))
+        if bot.is_exit(message):
+            break
+
+
+if __name__ == "__main__":
+    main()
